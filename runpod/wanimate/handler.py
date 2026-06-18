@@ -38,6 +38,8 @@ AUTO_DOWNLOAD_MODELS = os.environ.get("AUTO_DOWNLOAD_MODELS", "true").lower() ==
 COMFY_LOG_LEVEL = os.environ.get("COMFY_LOG_LEVEL", "INFO")
 COMFYUI_EXTRA_ARGS = os.environ.get("COMFYUI_EXTRA_ARGS", "")
 _COMFY_PROCESS: subprocess.Popen | None = None
+_COMFY_LOG_HANDLE = None
+COMFY_START_LOG = pathlib.Path(os.environ.get("COMFY_START_LOG", "/tmp/wanimate_comfyui_start.log"))
 
 REQUIRED_MODEL_FILES = [
     "models/diffusion_models/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors",
@@ -133,8 +135,18 @@ def ensure_models(force: bool = False) -> dict[str, Any]:
     }
 
 
+def log_tail(path: pathlib.Path, max_bytes: int = 12000) -> str:
+    try:
+        if not path.exists():
+            return ""
+        data = path.read_bytes()[-max_bytes:]
+        return data.decode("utf-8", "replace")
+    except Exception as exc:
+        return f"<could not read {path}: {exc}>"
+
+
 def start_comfyui() -> None:
-    global _COMFY_PROCESS
+    global _COMFY_PROCESS, _COMFY_LOG_HANDLE
     if _COMFY_PROCESS is not None and _COMFY_PROCESS.poll() is None:
         return
     cmd = [
@@ -150,7 +162,12 @@ def start_comfyui() -> None:
     if COMFYUI_EXTRA_ARGS:
         cmd[3:3] = COMFYUI_EXTRA_ARGS.split()
     print("wanimate-worker - starting ComfyUI on demand: " + " ".join(cmd))
-    _COMFY_PROCESS = subprocess.Popen(cmd, cwd="/comfyui")
+    try:
+        COMFY_START_LOG.unlink(missing_ok=True)
+    except Exception:
+        pass
+    _COMFY_LOG_HANDLE = COMFY_START_LOG.open("ab", buffering=0)
+    _COMFY_PROCESS = subprocess.Popen(cmd, cwd="/comfyui", stdout=_COMFY_LOG_HANDLE, stderr=subprocess.STDOUT)
 
 
 def check_server(start: bool = True) -> None:
@@ -159,6 +176,9 @@ def check_server(start: bool = True) -> None:
     url = f"http://{COMFY_HOST}/"
     print(f"wanimate-worker - waiting for ComfyUI at {url}")
     for attempt in range(900):
+        if _COMFY_PROCESS is not None and _COMFY_PROCESS.poll() is not None:
+            tail = log_tail(COMFY_START_LOG)
+            raise RuntimeError(f"ComfyUI process exited with code {_COMFY_PROCESS.returncode}. Log tail:\n{tail}")
         try:
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
@@ -169,7 +189,7 @@ def check_server(start: bool = True) -> None:
         if attempt and attempt % 30 == 0:
             print(f"wanimate-worker - still waiting for ComfyUI ({attempt}s)")
         time.sleep(1)
-    raise RuntimeError("ComfyUI server did not become reachable")
+    raise RuntimeError("ComfyUI server did not become reachable. Log tail:\n" + log_tail(COMFY_START_LOG))
 
 
 def queue_workflow(workflow: dict[str, Any], client_id: str) -> str:
