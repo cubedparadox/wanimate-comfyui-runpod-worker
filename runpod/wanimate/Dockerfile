@@ -32,6 +32,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
+# RunPod ADA_48_PRO workers currently expose an NVIDIA driver with CUDA 12.6.
+# Force PyTorch CUDA 12.6 wheels; newer cu128/cu130 wheels fail at runtime with
+# "NVIDIA driver on your system is too old".
+RUN uv pip install --force-reinstall \
+      torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 \
+      --index-url https://download.pytorch.org/whl/cu126
+
 # Install the custom nodes at the local commits known to register this workflow.
 RUN set -eux; \
     cd /comfyui/custom_nodes; \
