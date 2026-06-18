@@ -112,10 +112,43 @@ def missing_models() -> list[str]:
     return [rel for rel in REQUIRED_MODEL_FILES if not (MODEL_ROOT / rel).is_file()]
 
 
+def link_network_models() -> None:
+    """Expose /runpod-volume/models files through /comfyui/models.
+
+    worker-comfyui's extra_model_paths.yaml does not include every custom folder
+    used by WanVideoWrapper/WanAnimatePreprocess (diffusion_models,
+    text_encoders, detection, sam2). Symlink files into ComfyUI's normal model
+    tree so folder_paths discovers them during startup.
+    """
+    src_root = MODEL_ROOT / "models"
+    dst_root = pathlib.Path("/comfyui/models")
+    if not src_root.exists() or src_root.resolve() == dst_root.resolve():
+        return
+    for src_dir in src_root.iterdir():
+        if not src_dir.is_dir():
+            continue
+        dst_dir = dst_root / src_dir.name
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for src in src_dir.iterdir():
+            if not src.is_file():
+                continue
+            dst = dst_dir / src.name
+            if dst.exists():
+                continue
+            try:
+                dst.symlink_to(src)
+                print(f"wanimate-worker - linked model {dst} -> {src}")
+            except Exception as exc:
+                print(f"wanimate-worker - could not symlink {dst} -> {src}: {exc}; copying instead")
+                import shutil
+                shutil.copy2(src, dst)
+
+
 def ensure_models(force: bool = False) -> dict[str, Any]:
     missing = missing_models()
     if not force and not missing:
         print(f"wanimate-worker - all required models already exist under {MODEL_ROOT}")
+        link_network_models()
         return {"status": "ready", "model_root": str(MODEL_ROOT), "missing": []}
     if not MODEL_DOWNLOADER.exists():
         raise RuntimeError(f"Model downloader not found: {MODEL_DOWNLOADER}")
@@ -125,6 +158,7 @@ def ensure_models(force: bool = False) -> dict[str, Any]:
     started = time.time()
     subprocess.run([str(MODEL_DOWNLOADER), str(MODEL_ROOT)], check=True)
     elapsed = round(time.time() - started, 1)
+    link_network_models()
     missing_after = missing_models()
     status = "ready" if not missing_after else "missing_after_download"
     return {
@@ -149,6 +183,7 @@ def start_comfyui() -> None:
     global _COMFY_PROCESS, _COMFY_LOG_HANDLE
     if _COMFY_PROCESS is not None and _COMFY_PROCESS.poll() is None:
         return
+    link_network_models()
     cmd = [
         "python",
         "-u",
