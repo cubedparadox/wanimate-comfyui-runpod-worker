@@ -32,6 +32,7 @@ COMFY_HOST = os.environ.get("COMFY_HOST", "127.0.0.1:8188")
 COMFY_INPUT_DIR = pathlib.Path(os.environ.get("COMFY_INPUT_DIR", "/comfyui/input"))
 POLL_INTERVAL_SECONDS = float(os.environ.get("COMFY_POLL_INTERVAL_SECONDS", "1"))
 REQUEST_TIMEOUT_SECONDS = int(os.environ.get("REQUEST_TIMEOUT_SECONDS", "60"))
+COMFY_EXECUTION_TIMEOUT_SECONDS = int(os.environ.get("COMFY_EXECUTION_TIMEOUT_SECONDS", "7200"))
 MODEL_ROOT = pathlib.Path(os.environ.get("MODEL_ROOT", "/runpod-volume" if pathlib.Path("/runpod-volume").exists() else "/comfyui"))
 MODEL_DOWNLOADER = pathlib.Path(os.environ.get("MODEL_DOWNLOADER", "/opt/wanimate/download_models.sh"))
 AUTO_DOWNLOAD_MODELS = os.environ.get("AUTO_DOWNLOAD_MODELS", "true").lower() == "true"
@@ -246,14 +247,46 @@ def queue_workflow(workflow: dict[str, Any], client_id: str) -> str:
     return prompt_id
 
 
+def prompt_completed_in_history(prompt_id: str) -> bool:
+    try:
+        response = requests.get(f"http://{COMFY_HOST}/history/{prompt_id}", timeout=REQUEST_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        history = response.json().get(prompt_id)
+    except Exception as exc:
+        print(f"wanimate-worker - history poll failed for {prompt_id}: {exc}")
+        return False
+    if not history:
+        return False
+    status = history.get("status") or {}
+    if status.get("completed"):
+        print(f"wanimate-worker - prompt completed according to history {prompt_id}")
+        return True
+    if status.get("status_str") == "error":
+        messages = status.get("messages") or []
+        raise RuntimeError(f"ComfyUI execution failed according to history: {messages}")
+    return False
+
+
 def wait_for_prompt(prompt_id: str, client_id: str) -> None:
     ws_url = f"ws://{COMFY_HOST}/ws?clientId={client_id}"
     print(f"wanimate-worker - connecting websocket {ws_url}")
-    ws = websocket.WebSocket()
+    deadline = time.monotonic() + COMFY_EXECUTION_TIMEOUT_SECONDS
+    last_status = 0.0
+    ws = websocket.WebSocket(timeout=60)
     ws.connect(ws_url, timeout=30)
     try:
-        while True:
-            raw = ws.recv()
+        while time.monotonic() < deadline:
+            try:
+                raw = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                if prompt_completed_in_history(prompt_id):
+                    return
+                now = time.monotonic()
+                if now - last_status > 60:
+                    remaining = int(deadline - now)
+                    print(f"wanimate-worker - still waiting for prompt {prompt_id}; {remaining}s before worker timeout")
+                    last_status = now
+                continue
             if not isinstance(raw, str):
                 continue
             message = json.loads(raw)
@@ -271,6 +304,7 @@ def wait_for_prompt(prompt_id: str, client_id: str) -> None:
             if msg_type == "status":
                 remaining = (data.get("status") or {}).get("exec_info", {}).get("queue_remaining")
                 print(f"wanimate-worker - queue remaining: {remaining}")
+        raise TimeoutError(f"Timed out waiting {COMFY_EXECUTION_TIMEOUT_SECONDS}s for ComfyUI prompt {prompt_id}")
     finally:
         try:
             ws.close()
