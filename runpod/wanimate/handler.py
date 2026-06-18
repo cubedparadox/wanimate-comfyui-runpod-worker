@@ -35,6 +35,9 @@ REQUEST_TIMEOUT_SECONDS = int(os.environ.get("REQUEST_TIMEOUT_SECONDS", "60"))
 MODEL_ROOT = pathlib.Path(os.environ.get("MODEL_ROOT", "/runpod-volume" if pathlib.Path("/runpod-volume").exists() else "/comfyui"))
 MODEL_DOWNLOADER = pathlib.Path(os.environ.get("MODEL_DOWNLOADER", "/opt/wanimate/download_models.sh"))
 AUTO_DOWNLOAD_MODELS = os.environ.get("AUTO_DOWNLOAD_MODELS", "true").lower() == "true"
+COMFY_LOG_LEVEL = os.environ.get("COMFY_LOG_LEVEL", "INFO")
+COMFYUI_EXTRA_ARGS = os.environ.get("COMFYUI_EXTRA_ARGS", "")
+_COMFY_PROCESS: subprocess.Popen | None = None
 
 REQUIRED_MODEL_FILES = [
     "models/diffusion_models/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors",
@@ -130,7 +133,29 @@ def ensure_models(force: bool = False) -> dict[str, Any]:
     }
 
 
-def check_server() -> None:
+def start_comfyui() -> None:
+    global _COMFY_PROCESS
+    if _COMFY_PROCESS is not None and _COMFY_PROCESS.poll() is None:
+        return
+    cmd = [
+        "python",
+        "-u",
+        "/comfyui/main.py",
+        "--disable-auto-launch",
+        "--disable-metadata",
+        "--verbose",
+        COMFY_LOG_LEVEL,
+        "--log-stdout",
+    ]
+    if COMFYUI_EXTRA_ARGS:
+        cmd[3:3] = COMFYUI_EXTRA_ARGS.split()
+    print("wanimate-worker - starting ComfyUI on demand: " + " ".join(cmd))
+    _COMFY_PROCESS = subprocess.Popen(cmd, cwd="/comfyui")
+
+
+def check_server(start: bool = True) -> None:
+    if start:
+        start_comfyui()
     url = f"http://{COMFY_HOST}/"
     print(f"wanimate-worker - waiting for ComfyUI at {url}")
     for attempt in range(900):
@@ -286,8 +311,6 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
         mode = str(job_input.get("mode") or "run")
         workflow = job_input.get("workflow")
 
-        check_server()
-
         if mode in {"download_models", "ensure_models"}:
             return {"models": ensure_models(force=mode == "download_models")}
 
@@ -299,6 +322,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
             if model_status.get("missing"):
                 return {"error": "Required models are missing after download attempt", "models": model_status}
 
+        check_server(start=True)
         staged = stage_input_files(job_input)
         if staged:
             print(f"wanimate-worker - staged inputs: {staged}")

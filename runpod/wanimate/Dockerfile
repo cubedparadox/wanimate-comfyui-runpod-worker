@@ -69,10 +69,10 @@ RUN if [[ "${BAKE_MODELS}" == "true" ]]; then /opt/wanimate/download_models.sh /
 # Copy custom handler that returns VideoHelperSuite MP4 outputs (`gifs`) as videos.
 COPY runpod/wanimate/handler.py /handler.py
 
-# Let endpoint env add flags such as COMFYUI_EXTRA_ARGS=--lowvram for 24GB GPUs.
-RUN sed -i 's#python -u /comfyui/main.py --disable-auto-launch --disable-metadata#python -u /comfyui/main.py ${COMFYUI_EXTRA_ARGS:-} --disable-auto-launch --disable-metadata#g' /start.sh
-
 # Build-time import smoke test. CPU only; catches missing Python deps/custom-node syntax errors.
 RUN cd /comfyui && timeout 300 python main.py --quick-test-for-ci --cpu
 
-CMD ["/start.sh"]
+# Start the RunPod handler immediately. The handler starts ComfyUI on demand for
+# generation jobs, while model-download jobs can populate /runpod-volume without
+# waiting for ComfyUI to boot.
+CMD ["python", "-u", "/handler.py"]
