@@ -202,7 +202,7 @@ def queue_workflow(workflow: dict[str, Any], client_id: str) -> str:
     )
     if response.status_code >= 400:
         print("wanimate-worker - ComfyUI /prompt error:", response.text)
-    response.raise_for_status()
+        raise RuntimeError(f"ComfyUI /prompt returned HTTP {response.status_code}: {response.text}")
     result = response.json()
     prompt_id = result.get("prompt_id")
     if not prompt_id:
